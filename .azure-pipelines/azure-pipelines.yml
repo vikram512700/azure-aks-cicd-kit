@@ -1,0 +1,122 @@
+# =============================================================================
+# Azure Pipelines — Multi-Stage CI/CD
+# =============================================================================
+# Trigger: push to main
+# Stages: Validate → Build & Push (Python + Node) → Deploy to AKS
+#
+# Prerequisites (create in Azure DevOps Project Settings → Service Connections):
+#   1. "acr-service-connection"  — Azure RM, scoped to the playground RG
+#   2. "aks-service-connection"  — Azure RM, scoped to the playground RG
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - app-python/**
+      - app-nodejs/**
+      - k8s/**
+
+pool:
+  vmImage: "ubuntu-latest"
+
+# ---------------------------------------------------------------------------
+# Variables — update these to match your environment each session
+# ---------------------------------------------------------------------------
+variables:
+  acrServiceConnection: "acr-service-connection"
+  aksServiceConnection: "aks-service-connection"
+  acrName: "$(ACR_NAME)"                # Set in pipeline variables or variable group
+  acrLoginServer: "$(ACR_LOGIN_SERVER)"  # e.g., akscicdacrxyz123.azurecr.io
+  aksResourceGroup: "$(AKS_RESOURCE_GROUP)"
+  aksClusterName: "$(AKS_CLUSTER_NAME)"
+  k8sNamespace: "apps"
+
+# =============================================================================
+# STAGES
+# =============================================================================
+stages:
+  # -------------------------------------------------------------------------
+  # Stage 1: Validate — lint Dockerfiles, check K8s manifests
+  # -------------------------------------------------------------------------
+  - stage: Validate
+    displayName: "Validate"
+    jobs:
+      - job: ValidateManifests
+        displayName: "Validate K8s Manifests"
+        steps:
+          - script: |
+              echo "📋 Checking Kubernetes manifests syntax..."
+              for f in k8s/*.yaml; do
+                echo "  ✔ ${f}"
+                # Basic YAML validation
+                python3 -c "import yaml; yaml.safe_load(open('${f}'))"
+              done
+              echo "✅ All manifests are valid YAML."
+            displayName: "YAML Lint K8s Manifests"
+
+          - script: |
+              echo "🐳 Checking Dockerfiles exist..."
+              test -f app-python/Dockerfile && echo "  ✔ app-python/Dockerfile"
+              test -f app-nodejs/Dockerfile && echo "  ✔ app-nodejs/Dockerfile"
+              echo "✅ Dockerfiles present."
+            displayName: "Check Dockerfiles"
+
+  # -------------------------------------------------------------------------
+  # Stage 2: Build & Push — build Docker images, push to ACR
+  # -------------------------------------------------------------------------
+  - stage: BuildAndPush
+    displayName: "Build & Push"
+    dependsOn: Validate
+    jobs:
+      # --- Python App ---
+      - job: BuildPythonApp
+        displayName: "Build Python App"
+        steps:
+          - template: templates/build-push.yml
+            parameters:
+              appName: "python-app"
+              dockerfilePath: "app-python/Dockerfile"
+              buildContext: "app-python"
+              acrServiceConnection: $(acrServiceConnection)
+              acrLoginServer: $(acrLoginServer)
+
+      # --- Node.js App ---
+      - job: BuildNodejsApp
+        displayName: "Build Node.js App"
+        steps:
+          - template: templates/build-push.yml
+            parameters:
+              appName: "nodejs-app"
+              dockerfilePath: "app-nodejs/Dockerfile"
+              buildContext: "app-nodejs"
+              acrServiceConnection: $(acrServiceConnection)
+              acrLoginServer: $(acrLoginServer)
+
+  # -------------------------------------------------------------------------
+  # Stage 3: Deploy — apply K8s manifests, rolling update
+  # -------------------------------------------------------------------------
+  - stage: Deploy
+    displayName: "Deploy to AKS"
+    dependsOn: BuildAndPush
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployToAKS
+        displayName: "Deploy to AKS"
+        environment: "aks-production"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - template: templates/deploy-aks.yml
+                  parameters:
+                    aksServiceConnection: $(aksServiceConnection)
+                    aksResourceGroup: $(aksResourceGroup)
+                    aksClusterName: $(aksClusterName)
+                    acrLoginServer: $(acrLoginServer)
+                    k8sNamespace: $(k8sNamespace)
+                    buildId: $(Build.BuildId)

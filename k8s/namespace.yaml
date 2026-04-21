@@ -1,0 +1,9 @@
+# =============================================================================
+# Namespace — apps
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps
+  labels:
+    app.kubernetes.io/managed-by: azure-aks-cicd-kit

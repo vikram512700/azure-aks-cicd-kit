@@ -1,0 +1,19 @@
+# =============================================================================
+# Python Flask App — Service
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-app
+  namespace: apps
+  labels:
+    app: python-app
+spec:
+  type: ClusterIP
+  selector:
+    app: python-app
+  ports:
+    - port: 80
+      targetPort: 5000
+      protocol: TCP
+      name: http

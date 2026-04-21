@@ -1,0 +1,142 @@
+# =============================================================================
+# Template: Deploy to AKS
+# =============================================================================
+# Reusable template for deploying K8s manifests and rolling out new images.
+# Uses AzureCLI@2 + kubelogin for AAD-integrated AKS authentication.
+# =============================================================================
+
+parameters:
+  - name: aksServiceConnection
+    type: string
+    displayName: "AKS Azure RM service connection"
+  - name: aksResourceGroup
+    type: string
+    displayName: "AKS resource group name"
+  - name: aksClusterName
+    type: string
+    displayName: "AKS cluster name"
+  - name: acrLoginServer
+    type: string
+    displayName: "ACR login server"
+  - name: k8sNamespace
+    type: string
+    displayName: "Kubernetes namespace"
+    default: "apps"
+  - name: buildId
+    type: string
+    displayName: "Build ID for image tag"
+
+steps:
+  # -------------------------------------------------------------------------
+  # Install kubelogin for AAD auth
+  # -------------------------------------------------------------------------
+  - task: AzureCLI@2
+    displayName: "Install kubelogin"
+    inputs:
+      azureSubscription: ${{ parameters.aksServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        echo "📦 Installing kubelogin..."
+        az aks install-cli 2>/dev/null || true
+        kubelogin --version || echo "kubelogin already available"
+
+  # -------------------------------------------------------------------------
+  # Get AKS credentials
+  # -------------------------------------------------------------------------
+  - task: AzureCLI@2
+    displayName: "Get AKS Credentials"
+    inputs:
+      azureSubscription: ${{ parameters.aksServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        echo "🔑 Getting AKS credentials..."
+        az aks get-credentials \
+          --resource-group "${{ parameters.aksResourceGroup }}" \
+          --name "${{ parameters.aksClusterName }}" \
+          --overwrite-existing
+
+        # Convert kubeconfig for AAD auth
+        kubelogin convert-kubeconfig -l azurecli
+
+        echo "✅ kubectl configured for cluster ${{ parameters.aksClusterName }}"
+        kubectl cluster-info
+
+  # -------------------------------------------------------------------------
+  # Apply K8s manifests (namespace, secrets provider, services, ingress)
+  # -------------------------------------------------------------------------
+  - task: AzureCLI@2
+    displayName: "Apply K8s Manifests"
+    inputs:
+      azureSubscription: ${{ parameters.aksServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        echo "📋 Applying Kubernetes manifests..."
+
+        # Apply in order: namespace → secrets → deployments → services → ingress
+        kubectl apply -f k8s/namespace.yaml
+        kubectl apply -f k8s/secretproviderclass.yaml
+        kubectl apply -f k8s/python-deployment.yaml
+        kubectl apply -f k8s/python-service.yaml
+        kubectl apply -f k8s/nodejs-deployment.yaml
+        kubectl apply -f k8s/nodejs-service.yaml
+        kubectl apply -f k8s/ingress.yaml
+
+        echo "✅ All manifests applied."
+
+  # -------------------------------------------------------------------------
+  # Rolling update — set new image tag
+  # -------------------------------------------------------------------------
+  - task: AzureCLI@2
+    displayName: "Rolling Update — Python App"
+    inputs:
+      azureSubscription: ${{ parameters.aksServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        echo "🔄 Rolling update: python-app → ${{ parameters.acrLoginServer }}/python-app:${{ parameters.buildId }}"
+        kubectl set image deployment/python-app \
+          python-app=${{ parameters.acrLoginServer }}/python-app:${{ parameters.buildId }} \
+          -n ${{ parameters.k8sNamespace }}
+
+  - task: AzureCLI@2
+    displayName: "Rolling Update — Node.js App"
+    inputs:
+      azureSubscription: ${{ parameters.aksServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        echo "🔄 Rolling update: nodejs-app → ${{ parameters.acrLoginServer }}/nodejs-app:${{ parameters.buildId }}"
+        kubectl set image deployment/nodejs-app \
+          nodejs-app=${{ parameters.acrLoginServer }}/nodejs-app:${{ parameters.buildId }} \
+          -n ${{ parameters.k8sNamespace }}
+
+  # -------------------------------------------------------------------------
+  # Wait for rollout to complete (gate)
+  # -------------------------------------------------------------------------
+  - task: AzureCLI@2
+    displayName: "Wait for Rollout"
+    inputs:
+      azureSubscription: ${{ parameters.aksServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        echo "⏳ Waiting for python-app rollout..."
+        kubectl rollout status deployment/python-app -n ${{ parameters.k8sNamespace }} --timeout=180s
+
+        echo "⏳ Waiting for nodejs-app rollout..."
+        kubectl rollout status deployment/nodejs-app -n ${{ parameters.k8sNamespace }} --timeout=180s
+
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║  ✅ DEPLOYMENT COMPLETE                                ║"
+        echo "╠══════════════════════════════════════════════════════════╣"
+        echo "║  Both apps are live. Get the ingress IP:               ║"
+        echo "║  kubectl get ingress -n ${{ parameters.k8sNamespace }} ║"
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo ""
+        kubectl get pods -n ${{ parameters.k8sNamespace }}
+        echo ""
+        kubectl get ingress -n ${{ parameters.k8sNamespace }}

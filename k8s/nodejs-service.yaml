@@ -1,0 +1,19 @@
+# =============================================================================
+# Node.js Express App — Service
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: nodejs-app
+  namespace: apps
+  labels:
+    app: nodejs-app
+spec:
+  type: ClusterIP
+  selector:
+    app: nodejs-app
+  ports:
+    - port: 80
+      targetPort: 3000
+      protocol: TCP
+      name: http

@@ -1,0 +1,100 @@
+# =============================================================================
+# Node.js Express App — Deployment
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nodejs-app
+  namespace: apps
+  labels:
+    app: nodejs-app
+    app.kubernetes.io/managed-by: azure-aks-cicd-kit
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nodejs-app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: nodejs-app
+    spec:
+      # --- Security context (pod-level) ---
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+
+      containers:
+        - name: nodejs-app
+          # Image tag updated by CI/CD pipeline via kubectl set image
+          image: <ACR_LOGIN_SERVER>/nodejs-app:latest
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+
+          # --- Secrets from Key Vault (synced to K8s Secret) ---
+          envFrom:
+            - secretRef:
+                name: app-secrets-from-kv
+
+          # --- Resource requests/limits (sized for D2s_v3: 2 vCPU / 8 GB) ---
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          # --- Health probes ---
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # --- Security context (container-level) ---
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          # --- CSI volume mount (triggers secret sync) ---
+          volumeMounts:
+            - name: secrets-store
+              mountPath: "/mnt/secrets-store"
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        # Key Vault CSI driver volume
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: azure-kv-secrets
+        # Writable /tmp for the read-only root FS
+        - name: tmp
+          emptyDir: {}

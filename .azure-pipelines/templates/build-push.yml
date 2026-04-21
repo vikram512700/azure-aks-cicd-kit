@@ -1,0 +1,63 @@
+# =============================================================================
+# Template: Build & Push Docker Image to ACR
+# =============================================================================
+# Reusable template for building and pushing any app's Docker image.
+# =============================================================================
+
+parameters:
+  - name: appName
+    type: string
+    displayName: "Application name (used as image name)"
+  - name: dockerfilePath
+    type: string
+    displayName: "Path to Dockerfile"
+  - name: buildContext
+    type: string
+    displayName: "Docker build context directory"
+  - name: acrServiceConnection
+    type: string
+    displayName: "ACR service connection name"
+  - name: acrLoginServer
+    type: string
+    displayName: "ACR login server (e.g., myacr.azurecr.io)"
+
+steps:
+  # Login to ACR
+  - task: Docker@2
+    displayName: "Login to ACR"
+    inputs:
+      command: login
+      containerRegistry: ${{ parameters.acrServiceConnection }}
+
+  # Build Docker image
+  - task: Docker@2
+    displayName: "Build ${{ parameters.appName }}"
+    inputs:
+      command: build
+      repository: ${{ parameters.appName }}
+      dockerfile: ${{ parameters.dockerfilePath }}
+      buildContext: ${{ parameters.buildContext }}
+      tags: |
+        $(Build.BuildId)
+        latest
+
+  # Push to ACR with build ID tag
+  - task: Docker@2
+    displayName: "Push ${{ parameters.appName }}:$(Build.BuildId)"
+    inputs:
+      command: push
+      containerRegistry: ${{ parameters.acrServiceConnection }}
+      repository: ${{ parameters.appName }}
+      tags: |
+        $(Build.BuildId)
+        latest
+
+  # Print image info for audit trail
+  - script: |
+      echo "╔══════════════════════════════════════════════════════════╗"
+      echo "║  ✅ Image pushed successfully                          ║"
+      echo "╠══════════════════════════════════════════════════════════╣"
+      echo "║  Image: ${{ parameters.acrLoginServer }}/${{ parameters.appName }}:$(Build.BuildId)"
+      echo "║  Also:  ${{ parameters.acrLoginServer }}/${{ parameters.appName }}:latest"
+      echo "╚══════════════════════════════════════════════════════════╝"
+    displayName: "Print Image Info"

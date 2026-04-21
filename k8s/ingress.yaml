@@ -1,0 +1,41 @@
+# =============================================================================
+# Ingress — NGINX, path-based routing
+# =============================================================================
+# Single LoadBalancer, routes:
+#   /python  → python-app service
+#   /nodejs  → nodejs-app service
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: apps-ingress
+  namespace: apps
+  labels:
+    app.kubernetes.io/managed-by: azure-aks-cicd-kit
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          # /python → python-app:80
+          - path: /python(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: python-app
+                port:
+                  number: 80
+          # /nodejs → nodejs-app:80
+          - path: /nodejs(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: nodejs-app
+                port:
+                  number: 80

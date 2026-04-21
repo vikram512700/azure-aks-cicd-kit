@@ -1,0 +1,16 @@
+# =============================================================================
+# terraform.tfvars.example
+# =============================================================================
+# Copy this file to terraform.tfvars and paste your KodeKloud Playground
+# resource group name EVERY new 3-hour session.
+# =============================================================================
+
+# REQUIRED — paste the RG name from the KodeKloud Playground UI
+resource_group_name = "YOUR_PLAYGROUND_RG_NAME_HERE"
+
+# Optional overrides (defaults are fine for the sandbox)
+# location       = "Central US"
+# prefix         = "akscicd"
+# cluster_name   = "aks-cicd-cluster"
+# node_count     = 2
+# node_vm_size   = "Standard_D2s_v3"
