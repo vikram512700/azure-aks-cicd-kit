@@ -1,6 +1,6 @@
 # Azure AKS CI/CD Kit
 
-> **⚠️ This kit is built for KodeKloud's Azure Playground.** You do **NOT** have permission to create users, service principals, or subscription-scope role assignments. Everything is scoped to the single pre-existing resource group that regenerates every 3 hours.
+> **⚠️ This kit is built for KodeKloud's Azure Playground.** You do **NOT** have permission to create users, service principals, role assignments, or subscription-scope operations. Everything is scoped to the single pre-existing resource group that regenerates every 3 hours.
 
 Auto-deploy containerized **Python Flask** + **Node.js Express** apps to **AKS** using **Terraform**, **Git**, and **Azure Pipelines**.
 
@@ -15,21 +15,21 @@ Auto-deploy containerized **Python Flask** + **Node.js Express** apps to **AKS**
 │  ┌──────────┐   ┌───────────┐   ┌──────────────┐   ┌───────────┐  │
 │  │ Storage  │   │    ACR    │   │     AKS      │   │ Key Vault │  │
 │  │ Account  │   │  (Basic)  │   │ 2x D2s_v3   │   │ (Standard)│  │
-│  │ (tfstate)│   │           │   │              │   │           │  │
-│  └──────────┘   └─────┬─────┘   │ ┌──────────┐│   └─────┬─────┘  │
-│                       │         │ │  NGINX   ││         │        │
-│                       │ AcrPull │ │  Ingress ││  KV CSI │        │
-│                       │ (kubelet│ │    LB    ││  Secrets│        │
-│                       │  MI)    │ ├──────────┤│  User   │        │
+│  │ (tfstate)│   │ admin=on  │   │              │   │ access    │  │
+│  └──────────┘   └─────┬─────┘   │ ┌──────────┐│   │ policy    │  │
+│                       │         │ │  NGINX   ││   └─────┬─────┘  │
+│                       │ pull    │ │  Ingress ││  CSI    │        │
+│                       │ secret  │ │    LB    ││  addon  │        │
+│                       │         │ ├──────────┤│         │        │
 │                       └─────────┤ │python-app││─────────┘        │
 │                                 │ │nodejs-app││                  │
 │                                 │ └──────────┘│                  │
 │                                 └──────────────┘                  │
 │                                                                     │
-│  ┌──────────────────┐   ┌─────────────────────────────┐            │
-│  │ Log Analytics    │   │ VNet 10.0.0.0/16            │            │
-│  │ (PerGB2018)      │   │   └─ AKS Subnet 10.0.1.0/24│            │
-│  └──────────────────┘   └─────────────────────────────┘            │
+│  ┌─────────────────────────────┐                                   │
+│  │ VNet 10.0.0.0/16           │                                   │
+│  │   └─ AKS Subnet 10.0.1.0/24│                                  │
+│  └─────────────────────────────┘                                   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -45,13 +45,27 @@ git push main → Azure Pipelines triggers
 
 ---
 
+## Sandbox Constraints (Learned the Hard Way)
+
+| What's Blocked | Workaround Used |
+|---|---|
+| **Role assignments** (even at resource scope) | ACR: `admin_enabled = true` + `imagePullSecret`. KV: access policies (not RBAC) |
+| **Log Analytics / ContainerInsights** | Removed `oms_agent` block from AKS entirely |
+| **Changing KV permission model** | Must create KV with `rbac_authorization_enabled = false` from the start |
+| **Purging deleted Key Vaults** | Use a new KV name if old one is stuck in soft-delete |
+| **`az aks update --attach-acr`** | Fails (needs role assignment). Use `imagePullSecret` instead |
+| **Provider registration** | Set `resource_provider_registrations = "none"` in provider block |
+
+---
+
 ## 🚀 Setup — 6 Steps
 
 ### Prerequisites
 
+- **Ubuntu VM** with tools installed (run `install-deps.sh`):
+  - `git`, `az` CLI, `terraform`, `kubectl`, `kubelogin`, `docker`, `helm`
 - KodeKloud Azure Playground lab **active** (3-hour window)
-- `az login` completed (use the playground credentials)
-- Tools installed: `terraform`, `kubectl`, `kubelogin`, `az` CLI
+- `az login --use-device-code` completed
 
 ---
 
@@ -59,109 +73,121 @@ git push main → Azure Pipelines triggers
 
 Open the KodeKloud Playground UI → copy the **Resource Group** name (it changes every session).
 
-### Step 2: Create `terraform.tfvars`
+### Step 2: Create Terraform State Storage (once per session)
 
 ```bash
-cd terraform/
-cp terraform.tfvars.example terraform.tfvars
+# Replace with YOUR RG name
+RG_NAME="paste-your-rg-name-here"
+
+az storage account create \
+  --name tfstatevikram2025 \
+  --resource-group "$RG_NAME" \
+  --location centralus \
+  --sku Standard_LRS
+
+az storage container create \
+  --name tfstate \
+  --account-name tfstatevikram2025 \
+  --auth-mode login
 ```
 
-Edit `terraform.tfvars` and paste your RG name:
-
-```hcl
-resource_group_name = "1-a1b2c3d4-playground-sandbox"  # ← paste yours
-```
-
-### Step 3: Bootstrap Terraform State (once per session)
+### Step 3: Clone & Configure
 
 ```bash
-cd bootstrap/
-chmod +x bootstrap-backend.sh
-./bootstrap-backend.sh "<YOUR_RG_NAME>"
-```
+git clone https://github.com/vikram512700/azure-aks-cicd-kit.git
+cd azure-aks-cicd-kit/terraform
 
-This creates a Storage Account for Terraform state and prints the `terraform init` flags.
+# Create terraform.tfvars
+cat > terraform.tfvars << EOF
+resource_group_name = "$RG_NAME"
+keyvault_name       = "akscicdkv2"
+EOF
+```
 
 ### Step 4: Deploy Infrastructure
 
 ```bash
-cd terraform/
-
-# Option A: Use the printed flags
 terraform init -reconfigure \
-  -backend-config="resource_group_name=<RG_NAME>" \
-  -backend-config="storage_account_name=<SA_NAME>" \
+  -backend-config="resource_group_name=$RG_NAME" \
+  -backend-config="storage_account_name=tfstatevikram2025" \
   -backend-config="container_name=tfstate" \
-  -backend-config="key=aks-cicd-kit.tfstate"
+  -backend-config="key=aks-cicd-kit.tfstate" \
+  -backend-config="use_azuread_auth=true"
 
-# Option B: Use the generated backend.hcl
-terraform init -reconfigure -backend-config=backend.hcl
-
-# Review and apply
 terraform plan
-terraform apply
+terraform apply -auto-approve
 ```
 
-After `terraform apply`, note these outputs:
-- `acr_login_server` — for Docker push
-- `keyvault_name` — for SecretProviderClass
-- `kv_csi_identity_client_id` — for SecretProviderClass
-- `tenant_id` — for SecretProviderClass
-- `aks_get_credentials_command` — run this next
+After apply, note these outputs:
+- `acr_login_server`, `acr_name`
+- `keyvault_name`, `kv_csi_identity_client_id`, `tenant_id`
 
-### Step 5: Configure AKS & Deploy K8s Manifests
+### Step 5: Post-Terraform Setup
 
 ```bash
+# Save outputs to variables
+ACR_NAME=$(terraform output -raw acr_name)
+ACR_SERVER=$(terraform output -raw acr_login_server)
+ACR_USER=$(terraform output -raw acr_admin_username)
+ACR_PASS=$(terraform output -raw acr_admin_password)
+KV_NAME=$(terraform output -raw keyvault_name)
+KV_CSI_ID=$(terraform output -raw kv_csi_identity_client_id)
+TENANT_ID=$(terraform output -raw tenant_id)
+
 # Get AKS credentials
-az aks get-credentials \
-  --resource-group <RG_NAME> \
-  --name aks-cicd-cluster \
-  --overwrite-existing
+az aks get-credentials --resource-group $RG_NAME --name aks-cicd-cluster --overwrite-existing
+
+# Add KV access policy for CSI addon
+az keyvault set-policy --name $KV_NAME \
+  --object-id $(az aks show -g $RG_NAME -n aks-cicd-cluster --query "addonProfiles.azureKeyvaultSecretsProvider.identity.objectId" -o tsv) \
+  --secret-permissions get list
+
+# Update K8s manifests with real values
+cd ..
+sed -i "s/<REPLACE_WITH_kv_csi_identity_client_id>/$KV_CSI_ID/g" k8s/secretproviderclass.yaml
+sed -i "s/<REPLACE_WITH_keyvault_name>/$KV_NAME/g" k8s/secretproviderclass.yaml
+sed -i "s/<REPLACE_WITH_tenant_id>/$TENANT_ID/g" k8s/secretproviderclass.yaml
+sed -i "s/<ACR_LOGIN_SERVER>/$ACR_SERVER/g" k8s/python-deployment.yaml
+sed -i "s/<ACR_LOGIN_SERVER>/$ACR_SERVER/g" k8s/nodejs-deployment.yaml
 
 # Install NGINX ingress controller
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/cloud/deploy.yaml
 
-# Update k8s/secretproviderclass.yaml with Terraform outputs:
-#   userAssignedIdentityID: <kv_csi_identity_client_id>
-#   keyvaultName:           <keyvault_name>
-#   tenantId:               <tenant_id>
+# Create namespace + ACR pull secret
+kubectl apply -f k8s/namespace.yaml
+kubectl create secret docker-registry acr-pull-secret \
+  --namespace apps \
+  --docker-server=$ACR_SERVER \
+  --docker-username=$ACR_USER \
+  --docker-password=$ACR_PASS
+```
+
+### Step 6: Build, Push & Deploy
+
+```bash
+# Build and push Docker images
+docker login $ACR_SERVER -u $ACR_USER -p $ACR_PASS
+docker build -t $ACR_SERVER/python-app:latest ./app-python
+docker push $ACR_SERVER/python-app:latest
+docker build -t $ACR_SERVER/nodejs-app:latest ./app-nodejs
+docker push $ACR_SERVER/nodejs-app:latest
 
 # Apply all K8s manifests
 kubectl apply -f k8s/
 
-# Build and push initial images manually (first time only)
-az acr login --name <ACR_NAME>
-docker build -t <ACR_LOGIN_SERVER>/python-app:latest ./app-python
-docker push <ACR_LOGIN_SERVER>/python-app:latest
-docker build -t <ACR_LOGIN_SERVER>/nodejs-app:latest ./app-nodejs
-docker push <ACR_LOGIN_SERVER>/nodejs-app:latest
+# Verify
+kubectl get pods -n apps
+kubectl get ingress -n apps
 
-# Restart deployments to pick up images
-kubectl rollout restart deployment/python-app -n apps
-kubectl rollout restart deployment/nodejs-app -n apps
-```
+# Get the external IP
+INGRESS_IP=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+echo "App URLs:"
+echo "  Python: http://$INGRESS_IP/python"
+echo "  Node:   http://$INGRESS_IP/nodejs"
 
-### Step 6: Set Up Azure DevOps Pipeline
-
-1. Push this repo to Azure DevOps (or GitHub connected to Azure DevOps)
-2. Create **Service Connections** (Project Settings → Service connections):
-   - `acr-service-connection` — Azure RM, scoped to your current RG
-   - `aks-service-connection` — Azure RM, scoped to your current RG
-3. Create **Pipeline Variables** (or a Variable Group):
-   - `ACR_NAME` — from `terraform output acr_name`
-   - `ACR_LOGIN_SERVER` — from `terraform output acr_login_server`
-   - `AKS_RESOURCE_GROUP` — your playground RG name
-   - `AKS_CLUSTER_NAME` — from `terraform output aks_cluster_name`
-4. Create a new pipeline pointing to `.azure-pipelines/azure-pipelines.yml`
-5. Push to `main` → pipeline triggers automatically
-
-### Verify
-
-```bash
-kubectl get pods -n apps          # Should show 2/2 Running for each app
-kubectl get ingress -n apps       # Note the EXTERNAL-IP
-curl http://<EXTERNAL-IP>/python  # Python app response
-curl http://<EXTERNAL-IP>/nodejs  # Node.js app response
+# Test
+curl http://$INGRESS_IP/python
+curl http://$INGRESS_IP/nodejs
 ```
 
 ---
@@ -171,22 +197,22 @@ curl http://<EXTERNAL-IP>/nodejs  # Node.js app response
 ```
 azure-aks-cicd-kit/
 ├── terraform/
-│   ├── backend.tf                    # Remote state config (partial)
-│   ├── providers.tf                  # azurerm ~> 4.0
-│   ├── main.tf                       # AKS, ACR, Key Vault, Log Analytics
+│   ├── backend.tf                    # Remote state (use_azuread_auth)
+│   ├── providers.tf                  # azurerm ~> 4.0, skip provider registration
+│   ├── main.tf                       # AKS, ACR (admin), KV (access policies)
 │   ├── network.tf                    # VNet + Subnet + NSG
-│   ├── rbac.tf                       # Role assignments (RG/resource-scoped)
+│   ├── rbac.tf                       # DISABLED — sandbox blocks role assignments
 │   ├── variables.tf                  # All variables with validation
-│   ├── outputs.tf                    # Key outputs + next-steps banner
+│   ├── outputs.tf                    # Key outputs + post-apply commands
 │   └── terraform.tfvars.example      # Template — paste RG name here
 ├── bootstrap/
 │   └── bootstrap-backend.sh          # Creates state Storage Account
 ├── k8s/
 │   ├── namespace.yaml                # Namespace: apps
 │   ├── secretproviderclass.yaml      # KV CSI → K8s Secret sync
-│   ├── python-deployment.yaml        # Flask app (2 replicas, CSI vol)
+│   ├── python-deployment.yaml        # Flask (2 replicas, imagePullSecret, CSI)
 │   ├── python-service.yaml           # ClusterIP → port 5000
-│   ├── nodejs-deployment.yaml        # Express app (2 replicas, CSI vol)
+│   ├── nodejs-deployment.yaml        # Express (2 replicas, imagePullSecret, CSI)
 │   ├── nodejs-service.yaml           # ClusterIP → port 3000
 │   └── ingress.yaml                  # NGINX: /python, /nodejs
 ├── .azure-pipelines/
@@ -195,28 +221,28 @@ azure-aks-cicd-kit/
 │       ├── build-push.yml            # Reusable: Docker build + ACR push
 │       └── deploy-aks.yml            # Reusable: AKS deploy + rollout
 ├── app-python/
-│   ├── app.py                        # Flask app
-│   ├── requirements.txt              # Python deps
+│   ├── app.py                        # Flask app (/health, /)
+│   ├── requirements.txt              # Flask + Gunicorn
 │   └── Dockerfile                    # Multi-stage, non-root
 ├── app-nodejs/
-│   ├── index.js                      # Express app
-│   ├── package.json                  # Node deps
+│   ├── index.js                      # Express app (/health, /)
+│   ├── package.json                  # Express
 │   └── Dockerfile                    # Multi-stage, non-root
+├── install-deps.sh                   # Install all tools on Ubuntu VM
 └── README.md                         # This file
 ```
 
 ---
 
-## 🔐 Security Design
+## 🔐 Security Design (Sandbox-Compatible)
 
 | Concern | Approach |
 |---|---|
-| **ACR image pull** | AKS kubelet managed identity + `AcrPull` role (scoped to ACR) |
-| **Key Vault secrets** | CSI addon identity + `Key Vault Secrets User` role (scoped to KV) |
+| **ACR image pull** | `admin_enabled = true` + `imagePullSecret` in deployments |
+| **Key Vault secrets** | Access policies (not RBAC) + CSI addon identity |
 | **Network** | Kubenet, NSG allows only HTTP/HTTPS inbound |
 | **Container security** | `runAsNonRoot`, `readOnlyRootFilesystem`, drop all capabilities |
-| **No subscription perms** | All role assignments scoped to RG or resource ID |
-| **No service principals** | System-assigned managed identities only |
+| **No subscription perms** | No role assignments — all workarounds are resource-level |
 
 ---
 
@@ -225,72 +251,71 @@ azure-aks-cicd-kit/
 ### 1. ACR ImagePullBackOff
 
 ```bash
-# Check if AcrPull role is assigned
-az role assignment list --scope $(az acr show --name <ACR_NAME> --query id -o tsv) -o table
+# Check if imagePullSecret exists
+kubectl get secret acr-pull-secret -n apps
 
-# Verify kubelet identity
-kubectl describe pod <pod-name> -n apps | grep -A5 "Events"
-
-# Fix: ensure terraform applied rbac.tf successfully
-terraform apply -target=azurerm_role_assignment.acr_pull
+# If missing, recreate it:
+ACR_USER=$(terraform -chdir=terraform output -raw acr_admin_username)
+ACR_PASS=$(terraform -chdir=terraform output -raw acr_admin_password)
+kubectl create secret docker-registry acr-pull-secret \
+  --namespace apps \
+  --docker-server=<ACR_LOGIN_SERVER> \
+  --docker-username=$ACR_USER \
+  --docker-password=$ACR_PASS
 ```
 
 ### 2. Key Vault CSI Secret Not Mounting
 
 ```bash
-# Check SecretProviderClass
-kubectl describe secretproviderclass azure-kv-secrets -n apps
+# Verify the access policy was added
+az keyvault show --name <KV_NAME> --query "properties.accessPolicies"
 
 # Check CSI driver pods
 kubectl get pods -n kube-system | grep secrets-store
 
-# Verify role assignment
-az role assignment list --scope $(az keyvault show --name <KV_NAME> --query id -o tsv) -o table
-
-# Common fix: userAssignedIdentityID in secretproviderclass.yaml doesn't match
-# terraform output kv_csi_identity_client_id
+# Check SecretProviderClass values match terraform output
+kubectl describe secretproviderclass azure-kv-secrets -n apps
 ```
 
 ### 3. Ingress IP Stuck Pending
 
 ```bash
-# Check ingress controller is running
+# Check ingress controller pods
 kubectl get pods -n ingress-nginx
 
-# If not installed:
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/cloud/deploy.yaml
-
-# Wait for LB IP (takes 1-3 minutes)
+# Wait for LoadBalancer IP (1-3 minutes)
 kubectl get svc -n ingress-nginx --watch
 ```
 
 ### 4. Terraform State Lock After Lab Reset
 
-The lab reset deleted your Storage Account but Terraform thinks the lock still exists.
-
 ```bash
-# Option A: Re-run bootstrap (creates fresh SA)
-./bootstrap/bootstrap-backend.sh <NEW_RG_NAME>
-terraform init -reconfigure -backend-config=backend.hcl
-
-# Option B: If SA still exists, delete the lock blob
-az storage blob delete \
-  --account-name <SA_NAME> \
-  --container-name tfstate \
-  --name aks-cicd-kit.tfstate.lock
+# Lab reset deleted your SA — just re-bootstrap
+az storage account create --name tfstatevikram2025 --resource-group <NEW_RG> --location centralus --sku Standard_LRS
+az storage container create --name tfstate --account-name tfstatevikram2025 --auth-mode login
+terraform init -reconfigure -backend-config="resource_group_name=<NEW_RG>" ...
 ```
 
-### 5. "AuthorizationFailed" on Role Assignment
-
-This means you hit a **subscription-scope** operation. The playground doesn't allow this.
+### 5. Key Vault Name Conflict (Soft Delete)
 
 ```bash
-# Check the error — if scope starts with /subscriptions/... that's the problem
-# All scopes must be /subscriptions/.../resourceGroups/<RG>/...
+# If old KV is stuck in soft-delete and can't be purged, use a new name:
+# In terraform.tfvars:
+keyvault_name = "akscicdkv3"
+```
 
-# Fix: ensure rbac.tf uses resource-level scopes, not subscription
-# ✅ scope = azurerm_container_registry.acr.id
-# ❌ scope = "/subscriptions/${data.azurerm_client_config.current.subscription_id}"
+### 6. "AuthorizationFailed" on Any Operation
+
+This means you hit a **subscription-scope** operation. The sandbox doesn't allow this.
+
+```bash
+# Common culprits:
+# ❌ az aks update --attach-acr  (creates role assignment)
+# ❌ azurerm_role_assignment     (any scope)
+# ❌ az keyvault purge           (subscription-scope read)
+# ❌ Changing KV from RBAC → access policy mode
+
+# Fix: use the workarounds in this kit (admin creds, access policies, imagePullSecrets)
 ```
 
 ---
@@ -299,7 +324,7 @@ This means you hit a **subscription-scope** operation. The playground doesn't al
 
 | Event | Action |
 |---|---|
-| **New 3-hour session** | Copy RG name → update `terraform.tfvars` → re-run bootstrap + `terraform apply` |
+| **New 3-hour session** | Copy RG name → create state SA → update `terraform.tfvars` → `terraform apply` → post-setup |
 | **Session expires** | Everything is destroyed. State, cluster, images — all gone. That's expected. |
 | **Same session, code change** | `git push main` → pipeline auto-deploys (if Azure DevOps is set up) |
 | **Same session, manual deploy** | `docker build` → `docker push` → `kubectl set image` |

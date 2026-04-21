@@ -31,6 +31,10 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
 
+      # --- ACR pull secret (sandbox workaround — no AcrPull role allowed) ---
+      imagePullSecrets:
+        - name: acr-pull-secret
+
       containers:
         - name: nodejs-app
           # Image tag updated by CI/CD pipeline via kubectl set image
