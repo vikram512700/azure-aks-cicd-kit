@@ -17,7 +17,8 @@ terraform {
     # These are supplied at init time — do NOT hard-code them.
     # resource_group_name  = "..."
     # storage_account_name = "..."
-    container_name = "tfstate"
-    key            = "aks-cicd-kit.tfstate"
+    container_name   = "tfstate"
+    key              = "aks-cicd-kit.tfstate"
+    use_azuread_auth = true  # Authenticate via az login, not access keys
   }
 }
