@@ -15,11 +15,6 @@ output "aks_get_credentials_command" {
   value       = "az aks get-credentials --resource-group ${data.azurerm_resource_group.existing.name} --name ${azurerm_kubernetes_cluster.aks.name} --overwrite-existing"
 }
 
-output "aks_kubelet_identity_object_id" {
-  description = "Object ID of the AKS kubelet managed identity (used for AcrPull)."
-  value       = azurerm_kubernetes_cluster.aks.kubelet_identity[0].object_id
-}
-
 # ---------------------------------------------------------------------------
 # ACR
 # ---------------------------------------------------------------------------
@@ -31,6 +26,18 @@ output "acr_login_server" {
 output "acr_name" {
   description = "ACR name."
   value       = azurerm_container_registry.acr.name
+}
+
+output "acr_admin_username" {
+  description = "ACR admin username (for Docker login in sandbox)."
+  value       = azurerm_container_registry.acr.admin_username
+  sensitive   = true
+}
+
+output "acr_admin_password" {
+  description = "ACR admin password (for Docker login in sandbox)."
+  value       = azurerm_container_registry.acr.admin_password
+  sensitive   = true
 }
 
 # ---------------------------------------------------------------------------
@@ -60,38 +67,31 @@ output "tenant_id" {
 }
 
 # ---------------------------------------------------------------------------
-# Quick-start instructions
+# Quick-start
 # ---------------------------------------------------------------------------
 output "next_steps" {
   description = "What to do after terraform apply."
   value       = <<-EOT
 
-    ╔══════════════════════════════════════════════════════════════╗
-    ║                   NEXT STEPS                                ║
-    ╠══════════════════════════════════════════════════════════════╣
-    ║ 1. Get AKS credentials:                                    ║
-    ║    az aks get-credentials \                                 ║
-    ║      --resource-group ${data.azurerm_resource_group.existing.name} \
-    ║      --name ${azurerm_kubernetes_cluster.aks.name}          ║
-    ║                                                             ║
-    ║ 2. Update k8s/secretproviderclass.yaml with:                ║
-    ║    userAssignedIdentityID: ${azurerm_kubernetes_cluster.aks.key_vault_secrets_provider[0].secret_identity[0].client_id}
-    ║    keyvaultName: ${azurerm_key_vault.kv.name}               ║
-    ║    tenantId: ${data.azurerm_client_config.current.tenant_id}║
-    ║                                                             ║
-    ║ 3. Install NGINX ingress controller:                        ║
-    ║    kubectl apply -f https://raw.githubusercontent.com/      ║
-    ║      kubernetes/ingress-nginx/controller-v1.10.0/           ║
-    ║      deploy/static/provider/cloud/deploy.yaml               ║
-    ║                                                             ║
-    ║ 4. Apply K8s manifests:                                     ║
-    ║    kubectl apply -f k8s/                                    ║
-    ║                                                             ║
-    ║ 5. Push images to ACR:                                      ║
-    ║    az acr login --name ${azurerm_container_registry.acr.name}║
-    ║    docker build -t ${azurerm_container_registry.acr.login_server}/python-app:latest ./app-python
-    ║    docker push ${azurerm_container_registry.acr.login_server}/python-app:latest
-    ║                                                             ║
-    ╚══════════════════════════════════════════════════════════════╝
+    ====== NEXT STEPS ======
+
+    1. Get AKS credentials:
+       ${format("az aks get-credentials --resource-group %s --name %s --overwrite-existing", data.azurerm_resource_group.existing.name, azurerm_kubernetes_cluster.aks.name)}
+
+    2. Attach ACR to AKS (sandbox workaround):
+       ${format("az aks update --resource-group %s --name %s --attach-acr %s", data.azurerm_resource_group.existing.name, azurerm_kubernetes_cluster.aks.name, azurerm_container_registry.acr.name)}
+
+    3. Add KV access policy for CSI addon:
+       ${format("az keyvault set-policy --name %s --object-id %s --secret-permissions get list", azurerm_key_vault.kv.name, azurerm_kubernetes_cluster.aks.key_vault_secrets_provider[0].secret_identity[0].object_id)}
+
+    4. Update k8s/secretproviderclass.yaml:
+       userAssignedIdentityID: ${azurerm_kubernetes_cluster.aks.key_vault_secrets_provider[0].secret_identity[0].client_id}
+       keyvaultName: ${azurerm_key_vault.kv.name}
+       tenantId: ${data.azurerm_client_config.current.tenant_id}
+
+    5. Install NGINX ingress + apply manifests:
+       kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/cloud/deploy.yaml
+       kubectl apply -f k8s/
+
   EOT
 }
